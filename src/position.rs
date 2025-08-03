@@ -220,7 +220,6 @@ impl Position {
             }
 
             // Advance to next turn
-            self.en_passant_target = None;
             self.white_to_play = !self.white_to_play;
             Ok(result)
         } else {
@@ -242,6 +241,8 @@ impl Position {
                     captured_square = target;
                 }
             }
+
+            self.en_passant_target = past_move.en_passant_target;
 
             // Castling
             if peice.p_type == PieceType::King && (past_move.mv.src.file - past_move.mv.dest.file).abs() == 2 {
