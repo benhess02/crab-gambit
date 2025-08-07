@@ -3,16 +3,19 @@ mod position;
 mod square;
 mod piece;
 mod moves;
+mod transposition;
 
 use core::f32;
 use std::fmt::Display;
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::moves::{generate_legal_moves, generate_moves, Move};
 use crate::position::Position;
+use crate::transposition::{Bound, TranspositionTable};
 
 struct MoveChain {
     current: Move,
@@ -43,14 +46,16 @@ impl Display for MoveChain {
 
 struct SearchContext {
     move_lists: Vec<Vec<Move>>,
-    pub nodes: u32,
+    pub transposition_table: TranspositionTable,
+    pub nodes: u32
 }
 
 impl SearchContext {
     fn new() -> Self {
         Self {
             move_lists: Vec::new(),
-            nodes: 0,
+            transposition_table: TranspositionTable::new(100000),
+            nodes: 0
         }
     }
 
@@ -84,7 +89,6 @@ fn evaluate_to_play(ctx: &mut SearchContext, pos: &mut Position) -> f32 {
     score += to_play.intersect(pos.pawns).count() as f32;
 
     let mut moves: Vec<Move> = ctx.get_move_vec();
-    generate_moves(&mut moves, pos, true);
     generate_moves(&mut moves, pos, false);
     score += moves.len() as f32 * 0.1f32;
     ctx.return_move_vec(moves);
@@ -100,72 +104,117 @@ fn evaluate(ctx: &mut SearchContext, pos: &mut Position) -> f32 {
     return score;
 }
 
-fn minimax(ctx: &mut SearchContext, pos: &mut Position, depth: u32, final_layer: bool, mut score_min: f32, score_max: f32) -> Result<(f32, Option<MoveChain>), String> {
+fn minimax(ctx: &mut SearchContext, pos: &mut Position, depth: i32, is_done: &AtomicBool,
+        mut alpha: f32, beta: f32) -> Result<(f32, Option<MoveChain>), String> {
     ctx.nodes += 1;
+
+    if let Some((score, bound)) = ctx.transposition_table.get_score(pos, depth) {
+        if bound == Bound::Exact || (bound == Bound::Lower && score >= beta) || (bound == Bound::Upper && score < alpha) {
+            return Ok((score, None));
+        }
+    }
+
     if depth < 1 {
         let score = evaluate(ctx, pos);
-        return Ok((score, None));
+        ctx.transposition_table.set_score(pos, depth, alpha, Bound::Exact);
+        return Ok((score, None))
     }
 
     let mut moves: Vec<Move> = ctx.get_move_vec();
-    if final_layer {
+    if depth == 0 {
         generate_legal_moves(&mut moves, pos)?;
     } else {
         generate_moves(&mut moves, pos, true);
         generate_moves(&mut moves, pos, false);
     }
 
-    let mut best_score = f32::NEG_INFINITY;
+    if moves.len() == 0 {
+        let score = evaluate(ctx, pos);
+        if is_done.load(Ordering::Relaxed) {
+            return Ok((f32::NEG_INFINITY, None));
+        }
+        return Ok((score, None));
+    }
+
     let mut best_chain: Option<MoveChain> = None;
+    let mut bound = Bound::Upper;
     for mv in &moves {
         let past_move = pos.do_move(mv.clone())?;
-        let (mut score, chain) = minimax(ctx, pos, depth - 1, false, -score_max, -score_min)?;
+        let (mut score, chain) = minimax(ctx, pos, depth - 1, is_done, -beta, -alpha)?;
         score *= -1f32;
         pos.undo_move(past_move)?;
 
-        if score > best_score {
-            best_score = score;
+        if is_done.load(Ordering::Relaxed) {
+            return Ok((f32::NEG_INFINITY, None));
+        }
+
+        if score > alpha {
+            alpha = score;
+            bound = Bound::Exact;
             best_chain = Some(MoveChain::new(mv.clone(), chain));
-            if best_score > score_max {
+            if alpha >= beta {
+                bound = Bound::Lower;
                 break;
-            }
-            if best_score > score_min {
-                score_min = best_score;
             }
         }
     }
     ctx.return_move_vec(moves);
-    return Ok((best_score, best_chain));
+    if let Some(chain) = &best_chain {
+        let past_move = pos.do_move(chain.current)?;
+        ctx.transposition_table.set_score(pos, depth, alpha, bound);
+        pos.undo_move(past_move)?;
+    }
+    return Ok((alpha, best_chain));
 }
 
-fn iterative_deepening(mut pos: Position, max_time: Duration) {
+fn iterative_deepening(ctx: Arc<Mutex<SearchContext>>, mut pos: Position, max_time: Duration) {
 
     let end_time = Instant::now() + max_time;
 
     let (tx, rx) = mpsc::channel::<Move>();
-    let is_done = Arc::new(Mutex::new(false));
+    let is_done = Arc::new(AtomicBool::new(false));
     let inner_is_done = is_done.clone();
 
     thread::spawn(move || {
-        let mut depth: u32 = 1;
-        let mut ctx = SearchContext::new();
+        let mut _ctx = ctx.lock().unwrap();
 
-        while !*inner_is_done.lock().unwrap() {
-            ctx.reset();
+        let mut depth: i32 = 1;
+        _ctx.transposition_table.reset();
+
+        loop {
+            let start_time = Instant::now();
+            _ctx.reset();
             let (score, best_mv) = minimax(
-                &mut ctx,
+                &mut _ctx,
                 &mut pos,
                 depth,
-                true,
+                &inner_is_done,
                 f32::NEG_INFINITY,
                 f32::INFINITY
             ).unwrap();
+
+            if inner_is_done.load(Ordering::Relaxed) {
+                break;
+            }
+
+            let end_time = Instant::now();
+            let minimax_time = end_time - start_time;
+            let time_ms =  minimax_time.as_millis();
+            let nps = (_ctx.nodes as f32 / minimax_time.as_secs_f32()) as u32;
 
             if let Some(mv) = best_mv {
                 if let Err(_) = tx.send(mv.current) {
                     return;
                 }
-                println!("info depth {} nodes {} score cp {} pv {}", depth, ctx.nodes, (score * 100f32) as i32, mv);
+                println!("info depth {} time {} nodes {} nps {} score cp {} hashfull {} pv {}",
+                    depth,
+                    time_ms,
+                    _ctx.nodes,
+                    nps,
+                    (score * 100f32) as i32,
+                    _ctx.transposition_table.used_entires / (_ctx.transposition_table.size() / 1000),
+                    mv
+                );
             }
             depth += 1;
         }
@@ -177,9 +226,13 @@ fn iterative_deepening(mut pos: Position, max_time: Duration) {
             best_move = Some(mv);
         }
     }
-    *is_done.lock().unwrap() = true;
     if let Some(mv) = best_move {
+        is_done.store(true, Ordering::Relaxed);
         println!("bestmove {}", mv);
+    } else {
+        if let Ok(mv) = rx.recv() {
+            println!("bestmove {}", mv);
+        }
     }
 }
 
@@ -189,6 +242,8 @@ fn main() -> Result<(), String> {
     let mut line = String::new();
 
     let mut pos = Position::start();
+
+    let ctx = Arc::new(Mutex::new(SearchContext::new()));
 
     loop {
         line.clear();
@@ -219,7 +274,7 @@ fn main() -> Result<(), String> {
                 }
             },
             "go" => {
-                iterative_deepening(pos.clone(), Duration::from_secs(3));
+                iterative_deepening(ctx.clone(), pos.clone(), Duration::from_secs(6));
             }
             _ => {}
         }
