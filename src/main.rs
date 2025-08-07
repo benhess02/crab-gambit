@@ -104,7 +104,7 @@ fn evaluate(ctx: &mut SearchContext, pos: &mut Position) -> f32 {
     return score;
 }
 
-fn minimax(ctx: &mut SearchContext, pos: &mut Position, depth: i32, is_done: &AtomicBool,
+fn minimax(ctx: &mut SearchContext, pos: &mut Position, depth: i32, is_root: bool, is_done: &AtomicBool,
         mut alpha: f32, beta: f32) -> Result<(f32, Option<MoveChain>), String> {
     ctx.nodes += 1;
 
@@ -116,12 +116,12 @@ fn minimax(ctx: &mut SearchContext, pos: &mut Position, depth: i32, is_done: &At
 
     if depth < 1 {
         let score = evaluate(ctx, pos);
-        ctx.transposition_table.set_score(pos, depth, alpha, Bound::Exact);
+        ctx.transposition_table.set_score(pos, depth, score, Bound::Exact);
         return Ok((score, None))
     }
 
     let mut moves: Vec<Move> = ctx.get_move_vec();
-    if depth == 0 {
+    if is_root {
         generate_legal_moves(&mut moves, pos)?;
     } else {
         generate_moves(&mut moves, pos, true);
@@ -140,7 +140,7 @@ fn minimax(ctx: &mut SearchContext, pos: &mut Position, depth: i32, is_done: &At
     let mut bound = Bound::Upper;
     for mv in &moves {
         let past_move = pos.do_move(mv.clone())?;
-        let (mut score, chain) = minimax(ctx, pos, depth - 1, is_done, -beta, -alpha)?;
+        let (mut score, chain) = minimax(ctx, pos, depth - 1, false, is_done, -beta, -alpha)?;
         score *= -1f32;
         pos.undo_move(past_move)?;
 
@@ -188,6 +188,7 @@ fn iterative_deepening(ctx: Arc<Mutex<SearchContext>>, mut pos: Position, max_ti
                 &mut _ctx,
                 &mut pos,
                 depth,
+                true,
                 &inner_is_done,
                 f32::NEG_INFINITY,
                 f32::INFINITY
