@@ -217,7 +217,7 @@ fn generate_king_moves(moves: &mut Vec<Move>, pos: &Position, src: Square, captu
 pub fn generate_moves(moves: &mut Vec<Move>, pos: &Position, capture: bool) {
     let to_play = pos.by_color(pos.white_to_play);
 
-    if pos.kings.intersect(to_play).count() == 0 {
+    if pos.kings.count() < 2 {
         return;
     }
 

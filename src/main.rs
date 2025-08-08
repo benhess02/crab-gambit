@@ -13,6 +13,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::bitboard::Bitboard;
 use crate::moves::{generate_legal_moves, generate_moves, Move};
 use crate::position::Position;
 
@@ -78,12 +79,30 @@ fn evaluate_to_play(ctx: &mut SearchContext, pos: &mut Position) -> f32 {
     let mut score = 0f32;
     let to_play = pos.by_color(pos.white_to_play);
 
+    if pos.kings.intersect(to_play).count() == 0 {
+        return f32::NEG_INFINITY;
+    }
+
     score += to_play.intersect(pos.kings).count() as f32 * 200f32;
     score += to_play.intersect(pos.queens).count() as f32 * 9f32;
     score += to_play.intersect(pos.rooks).count() as f32 * 5f32;
     score += to_play.intersect(pos.bishops).count() as f32 * 3f32;
     score += to_play.intersect(pos.knights).count() as f32 * 3f32;
     score += to_play.intersect(pos.pawns).count() as f32;
+
+    let pawns = pos.pawns.intersect(to_play);
+    for sq in pawns {
+        // Doubled pawns
+        if pawns.intersect(Bitboard::file(sq.file)).count() > 1 {
+            score -= 0.25;
+        }
+
+        // Isolated pawn
+        if pawns.intersect(Bitboard::file(sq.file + 1)).count() == 0
+            && pawns.intersect(Bitboard::file(sq.file - 1)).count() == 0 {
+            score -= 0.5;
+        }
+    }
 
     let mut moves: Vec<Move> = ctx.get_move_vec();
     generate_moves(&mut moves, pos, false);

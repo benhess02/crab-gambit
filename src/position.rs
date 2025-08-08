@@ -272,6 +272,9 @@ impl Position {
     }
 
     pub fn is_check(&mut self) -> Result<bool, String> {
+        if self.kings.intersect(self.by_color(self.white_to_play)).count() == 0 {
+            return Ok(true);
+        }
         let mut moves: Vec<Move> = Vec::new();
         self.do_null_move();
         generate_moves(&mut moves, self, true);
